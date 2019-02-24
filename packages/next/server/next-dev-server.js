@@ -51,6 +51,9 @@ export default class DevServer extends Server {
     }
   }
 
+  // create HotReloader + start it
+  // server prepare ???
+  // set dev ready
   async prepare () {
     this.hotReloader = new HotReloader(this.dir, { config: this.nextConfig, buildId: this.buildId })
     await super.prepare()
@@ -59,19 +62,24 @@ export default class DevServer extends Server {
     this.setDevReady()
   }
 
+  // just close HotReloader
   async close () {
     if (this.hotReloader) {
       await this.hotReloader.stop()
     }
   }
 
+  // wait until devReady (`setDevReady` is called)
+  // then HotReloader.run and maybe Server.run
   async run (req, res, parsedUrl) {
     await this.devReady
+    // (HotReloader).run
     const {finished} = await this.hotReloader.run(req, res, parsedUrl)
     if (finished) {
       return
     }
 
+    // (Server).run
     return super.run(req, res, parsedUrl)
   }
 

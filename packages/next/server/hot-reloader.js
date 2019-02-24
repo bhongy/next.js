@@ -372,6 +372,7 @@ export default class HotReloader {
     }
   }
 
+  // delegate to WebpackDevMiddleware.waitUntilValid
   waitUntilValid (webpackDevMiddleware) {
     const middleware = webpackDevMiddleware || this.webpackDevMiddleware
     return new Promise((resolve) => {

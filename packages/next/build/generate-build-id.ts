@@ -1,3 +1,4 @@
+// umm ... indirection for absolutely NOTHING
 export async function generateBuildId (generate: () => string|null, fallback: () => string): Promise<string> {
   let buildId = await generate()
   // If there's no buildId defined we'll fall back

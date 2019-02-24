@@ -1,7 +1,6 @@
 import {join} from 'path'
 import {stringify} from 'querystring'
-import {PAGES_DIR_ALIAS, DOT_NEXT_ALIAS} from '../lib/constants'
-import {ServerlessLoaderQuery} from './webpack/loaders/next-serverless-loader'
+import {PAGES_DIR_ALIAS} from '../lib/constants'
 
 type PagesMapping = {
   [page: string]: string
@@ -9,6 +8,9 @@ type PagesMapping = {
 
 export function createPagesMapping(pagePaths: string[], extensions: string[]): PagesMapping {
   const pages: PagesMapping = pagePaths.reduce((result: PagesMapping, pagePath): PagesMapping => {
+    // remove extentions
+    // convert "\" to "/"
+    // replace (ending) 'index' to ''
     const page = `/${pagePath.replace(new RegExp(`\\.+(${extensions.join('|')})$`), '').replace(/\\/g, '/')}`.replace(/\/index$/, '')
     result[page === '' ? '/' : page] = join(PAGES_DIR_ALIAS, pagePath).replace(/\\/g, '/')
     return result
@@ -30,30 +32,22 @@ type Entrypoints = {
   server: WebpackEntrypoints
 }
 
+// client entrypoints are just a bunch of
+// 'static/<buildId>/pages/index.js' (bundlePath)
+// -> 'next-client-pages-loader?page=%2Findex.js&absolutePagePath=build%2Findex.1234.js'
+// 
+// server entrypoints are :
+// 'static/<buildId>/pages/index.js' (bundlePath)
+// -> ['build/index.1234.js']
 export function createEntrypoints(pages: PagesMapping, target: 'server'|'serverless', buildId: string, config: any): Entrypoints {
   const client: WebpackEntrypoints = {}
   const server: WebpackEntrypoints = {}
-
-  const defaultServerlessOptions = {
-    absoluteAppPath: pages['/_app'],
-    absoluteDocumentPath: pages['/_document'],
-    absoluteErrorPath: pages['/_error'],
-    distDir: DOT_NEXT_ALIAS,
-    buildId,
-    assetPrefix: config.assetPrefix,
-    generateEtags: config.generateEtags
-  }
 
   Object.keys(pages).forEach((page) => {
     const absolutePagePath = pages[page]
     const bundleFile = page === '/' ? '/index.js' : `${page}.js`
     const bundlePath = join('static', buildId, 'pages', bundleFile)
-    if(target === 'serverless') {
-      const serverlessLoaderOptions: ServerlessLoaderQuery = {page, absolutePagePath, ...defaultServerlessOptions}
-      server[join('pages', bundleFile)] = `next-serverless-loader?${stringify(serverlessLoaderOptions)}!`
-    } else if(target === 'server') {
-      server[bundlePath] = [absolutePagePath]
-    }
+    server[bundlePath] = [absolutePagePath]
     if (page === '/_document') {
       return
     }

@@ -5,6 +5,7 @@ import {BUILD_ID_FILE} from 'next-server/constants'
 
 const writeFile = promisify(fs.writeFile)
 
+// write `buildId` into BUILD_ID file
 export async function writeBuildId (distDir: string, buildId: string): Promise<void> {
   const buildIdPath = join(distDir, BUILD_ID_FILE)
   await writeFile(buildIdPath, buildId, 'utf8')

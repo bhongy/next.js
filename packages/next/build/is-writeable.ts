@@ -3,6 +3,7 @@ import {promisify} from 'util'
 
 const access = promisify(fs.access)
 
+// good, simple helper to check if a directory is writable
 export async function isWriteable (directory: string): Promise<boolean> {
   try {
     await access(directory, (fs.constants || fs).W_OK)

@@ -17,17 +17,17 @@ function collectPages (directory: string, pageExtensions: string[]): Promise<str
   return glob(`**/*.+(${pageExtensions.join('|')})`, {cwd: directory})
 }
 
-function printTreeView(list: string[]) {
-  list
-    .sort((a, b) => a > b ? 1 : -1)
-    .forEach((item, i) => {
-      const corner = i === 0 ? list.length === 1 ? '─' : '┌' : i === list.length - 1 ? '└' : '├'
-      console.log(` \x1b[90m${corner}\x1b[39m ${item}`)
-    })
-
-  console.log()
-}
-
+// default config.pageExtension is ['jsx', 'js']
+// glob all "pages" off the file system
+//   -> pagePaths (location on file system relative to "pages" folder)
+// create a lookup map from globbed pages
+//   -> pagesMapping (a mapping from url pathname to pagePath)
+// use pageMapping to create webpack config.entry
+//   -> entrypoints { client, server } -> client uses next-client-pages-loader plugin
+// create webpack server & client configs from entrypoints
+// run compiler "once" for each config
+// write buildId out - next buildId is __not__ webpack compilation hash
+//   just random hash created when this function is called
 export default async function build (dir: string, conf = null): Promise<void> {
   if (!await isWriteable(dir)) {
     throw new Error('> Build directory is not writeable. https://err.sh/zeit/next.js/build-dir-not-writeable')
@@ -47,20 +47,8 @@ export default async function build (dir: string, conf = null): Promise<void> {
   ])
 
   let result: CompilerResult = {warnings: [], errors: []}
-  if (config.target === 'serverless') {
-    if (config.publicRuntimeConfig) throw new Error('Cannot use publicRuntimeConfig with target=serverless https://err.sh/zeit/next.js/serverless-publicRuntimeConfig')
-
-    const clientResult = await runCompiler([configs[0]])
-    // Fail build if clientResult contains errors
-    if(clientResult.errors.length > 0) {
-      result = {warnings: [...clientResult.warnings], errors: [...clientResult.errors]}
-    } else {
-      const serverResult = await runCompiler([configs[1]])
-      result = {warnings: [...clientResult.warnings, ...serverResult.warnings], errors: [...clientResult.errors, ...serverResult.errors]}
-    }
-  } else {
-    result = await runCompiler(configs)
-  }
+  // runCompiler -> creates webpack instance from scratch and call `compiler.run` as a promise
+  result = await runCompiler(configs);
 
   if (result.warnings.length > 0) {
     console.warn('> Emitted warnings from webpack')
@@ -71,8 +59,6 @@ export default async function build (dir: string, conf = null): Promise<void> {
     result.errors.forEach((error) => console.error(error))
     throw new Error('> Build failed because of webpack errors')
   }
-
-  printTreeView(Object.keys(pages))
 
   await writeBuildId(distDir, buildId)
 }

@@ -5,6 +5,10 @@ export type CompilerResult = {
   warnings: Error[]
 }
 
+// super simple:
+//   create webpack compiler for each config (not multicompiler)
+//   compiler.run as a promise
+//   massage result when it doens't need to
 export function runCompiler (config: webpack.Configuration[]): Promise<CompilerResult> {
   return new Promise(async (resolve, reject) => {
     const compiler = webpack(config)
