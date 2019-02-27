@@ -8,6 +8,7 @@ export function pageNotFoundError(page: string): Error {
   return err
 }
 
+// get require path for the page from `dist` directory
 export function getPagePath(page: string, distDir: string): string {
   const serverBuildPath = join(distDir, SERVER_DIRECTORY)
   const pagesManifest = require(join(serverBuildPath, PAGES_MANIFEST))

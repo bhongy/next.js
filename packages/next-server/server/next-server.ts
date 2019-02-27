@@ -85,6 +85,7 @@ export default class Server {
     console.error(...args)
   }
 
+  // just parse url and querystring then delegate to `this.run`
   private handleRequest(req: IncomingMessage, res: ServerResponse, parsedUrl?: UrlWithParsedQuery): Promise<void> {
     // Parse url if parsedUrl not provided
     if (!parsedUrl || typeof parsedUrl !== 'object') {
@@ -179,6 +180,9 @@ export default class Server {
     return routes
   }
 
+  // the core of "handleRequest"
+  // `router.match` then calls the handler function -> can throw
+  // this method calls `res.end` (directly or through other functions)
   private async run(req: IncomingMessage, res: ServerResponse, parsedUrl: UrlWithParsedQuery) {
     try {
       const fn = this.router.match(req, res, parsedUrl)
@@ -194,6 +198,7 @@ export default class Server {
       throw err
     }
 
+    // if route not match
     if (req.method === 'GET' || req.method === 'HEAD') {
       await this.render404(req, res, parsedUrl)
     } else {
@@ -202,6 +207,8 @@ export default class Server {
     }
   }
 
+  // delegate to `sendHTML` function which sets etag, content-type
+  // do `res.end`
   private async sendHTML(req: IncomingMessage, res: ServerResponse, html: string) {
     const {generateEtags} = this.renderOpts
     return sendHTML(req, res, html, {generateEtags})
@@ -209,6 +216,7 @@ export default class Server {
 
   public async render(req: IncomingMessage, res: ServerResponse, pathname: string, query: ParsedUrlQuery = {}, parsedUrl?: UrlWithParsedQuery): Promise<void> {
     const url: any = req.url
+    // starts with `/_next/` or `/static/`
     if (isInternalUrl(url)) {
       return this.handleRequest(req, res, parsedUrl)
     }
@@ -229,11 +237,22 @@ export default class Server {
     return this.sendHTML(req, res, html)
   }
 
+  // use `loadComponents` and `renderToHTML` function
+  // 
+  // `loadComponents` return {buildManifest, reactLoadableManifest, Component, Document, App}
+  // which are data from bundles that are "required"/loaded from disk
+  // 
+  // `renderToHTML` is the main render function
+  // uses the result from loading components and "render"
+  // call getInitialProps, require dynamic imports synchornously
+  // renders both the document and the App+Component to string
   private async renderToHTMLWithComponents(req: IncomingMessage, res: ServerResponse, pathname: string, query: ParsedUrlQuery = {}, opts: any) {
     const result = await loadComponents(this.distDir, this.buildId, pathname)
     return renderToHTML(req, res, pathname, query, {...result, ...opts})
   }
 
+  // delegate to `renderToHTMLWithComponents`
+  // with 404 or 500 fallback - both use `renderToHTMLWithComponents` under the hood
   public async renderToHTML(req: IncomingMessage, res: ServerResponse, pathname: string, query: ParsedUrlQuery = {}): Promise<string|null> {
     try {
       // To make sure the try/catch is executed
@@ -251,6 +270,9 @@ export default class Server {
     }
   }
 
+  // renderHTML using path `/_error`
+  // not sure why we don't always use this one
+  // instead of using or delegating to renderErrorToHTML
   public async renderError(err: Error|null, req: IncomingMessage, res: ServerResponse, pathname: string, query: ParsedUrlQuery = {}): Promise<void> {
     res.setHeader('Cache-Control', 'no-cache, no-store, max-age=0, must-revalidate')
     const html = await this.renderErrorToHTML(err, req, res, pathname, query)
@@ -260,10 +282,12 @@ export default class Server {
     return this.sendHTML(req, res, html)
   }
 
+  // renderHTML using path `/_error`
   public async renderErrorToHTML(err: Error|null, req: IncomingMessage, res: ServerResponse, _pathname: string, query: ParsedUrlQuery = {}) {
     return this.renderToHTMLWithComponents(req, res, '/_error', query, {...this.renderOpts, err})
   }
 
+  // renderError with `404` status code
   public async render404(req: IncomingMessage, res: ServerResponse, parsedUrl?: UrlWithParsedQuery): Promise<void> {
     const url: any = req.url
     const { pathname, query } = parsedUrl ? parsedUrl : parseUrl(url, true)

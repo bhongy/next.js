@@ -31,6 +31,9 @@ function enhanceComponents(options: ComponentsEnhancer, App: React.ComponentType
   }
 }
 
+// doesn't really do much - just call the input function `renderElementToString`
+// -- only used in `renderToHTML`
+// and return the result sting back
 function render(renderElementToString: (element: React.ReactElement<any>) => string, element: React.ReactElement<any>): {html: string, head: any} {
   let html
   let head
@@ -60,6 +63,7 @@ type RenderOpts = {
   ErrorDebug?: React.ComponentType<{error: Error}>,
 }
 
+// render `Document` using `ReactDOMServer.renderToStaticMarkup`
 function renderDocument(Document: React.ComponentType, {
   props,
   docProps,
@@ -104,11 +108,20 @@ function renderDocument(Document: React.ComponentType, {
       files={files}
       dynamicImports={dynamicImports}
       assetPrefix={assetPrefix}
+      // for the default Document this will contains `html` and `head`
+      // due to how Document.getInitialProps is implemented
+      // although the default Document
+      // pass all `props` down via `context._documentProps`
       {...docProps}
     />,
   )
 }
 
+// TOP-LEVEL
+// ---
+// render "page" (App->Component) to string using `ReactDOMServer.renderToString`
+// (unless using it as a static site generator then use `renderToStaticMarkup`)
+// the majority is preparing props to call `renderDocument`
 export async function renderToHTML(req: IncomingMessage, res: ServerResponse, pathname: string, query: ParsedUrlQuery, renderOpts: RenderOpts): Promise<string|null> {
   const {
     err,
@@ -156,6 +169,10 @@ export async function renderToHTML(req: IncomingMessage, res: ServerResponse, pa
   ]
 
   const reactLoadableModules: string[] = []
+  // this is not a function it's an object of {html: string, head: any}
+  // (string) result from rendering the ErrorDebug or `renderOpts.Component`
+  // the Document.getInitialProps will be called with { renderPage }
+  // the default Document will return initialProps with { html, head } as-is
   const renderPage = (options: ComponentsEnhancer = {}): {html: string, head: any} => {
     const renderElementToString = staticMarkup ? renderToStaticMarkup : renderToString
 
@@ -176,6 +193,7 @@ export async function renderToHTML(req: IncomingMessage, res: ServerResponse, pa
     )
   }
 
+  // for default Document component, `docProps` will contain `html` and `head`
   const docProps = await loadGetInitialProps(Document, { ...ctx, renderPage })
   // the response might be finished on the getInitialProps call
   if (isResSent(res)) return null
