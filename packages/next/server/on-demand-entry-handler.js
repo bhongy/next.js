@@ -9,6 +9,7 @@ import {normalizePagePath} from 'next-server/dist/server/normalize-page-path'
 import { ROUTE_NAME_REGEX, IS_BUNDLED_PAGE_REGEX } from 'next-server/constants'
 import {stringify} from 'querystring'
 
+// status "*enum" for the entry.status
 const ADDED = Symbol('added')
 const BUILDING = Symbol('building')
 const BUILT = Symbol('built')
@@ -38,17 +39,34 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
 }) {
   const {compilers} = multiCompiler
   const invalidator = new Invalidator(devMiddleware, multiCompiler)
+  // this is the entry map webpack use for compilation
+  // it is managed here (add/remove) to achieve on-demand entries
+  // there is a dispose entries function
+  // that runs every 5 seconds (outside webpack hooks)
+  // the dispose functino removes entries that is "inactive"
+  // so webpack builds only what's needed
+  // I'd like to look for a better way to achieve on-demand entries
   let entries = {}
+  // keeping track of active pages
   let lastAccessPages = ['']
   let doneCallbacks = new EventEmitter()
   let reloading = false
   let stopped = false
   let reloadCallbacks = new EventEmitter()
 
+  // on "make" give webpack the entries map (what to build)
+  // ---
+  // for every compiler
+  // check all entries if they're still writable
+  // -> remove from `entries` and do nothing if not
+  // set status on all entries to BUILDING
+  // add "all"? of them to the compilation (to be compiled)
   for (const compiler of compilers) {
     compiler.hooks.make.tapPromise('NextJsOnDemandEntries', (compilation) => {
+      // mark "building" state
       invalidator.startBuilding()
 
+      // the `entries` object is from the closure (onDemandEntriesHandler)
       const allEntries = Object.keys(entries).map(async (page) => {
         const { name, absolutePagePath } = entries[page]
         try {
@@ -63,14 +81,18 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
         return addEntry(compilation, compiler.context, name, [compiler.name === 'client' ? `next-client-pages-loader?${stringify({page, absolutePagePath})}!` : absolutePagePath])
       })
 
+      // returns a promise because `hooks.make.tapPromise`
       return Promise.all(allEntries)
     })
   }
 
   multiCompiler.hooks.done.tap('NextJsOnDemandEntries', (multiStats) => {
     const clientStats = multiStats.stats[0]
+    // might be a lot easier to work with data to just clientStats.toJson() here
     const { compilation } = clientStats
     const hardFailedPages = compilation.errors
+      // keep only failed-page errors
+      // IS_BUNDLED_PAGE_REGEX.test(module.name) or (module.dependencies.length) == 0
       .filter(e => {
         // Make sure to only pick errors which marked with missing modules
         const hasNoModuleFoundError = /ENOENT/.test(e.message) || /Module not found/.test(e.message)
@@ -84,32 +106,49 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
         return e.module.dependencies.length === 0
       })
       .map(e => e.module.chunks)
-      .reduce((a, b) => [...a, ...b], [])
+      .reduce((a, b) => [...a, ...b], []) // concat + flatten all chunks
+      // chunks -> pagePath (like '/' or '/foo/bar')
       .map(c => {
         const pageName = ROUTE_NAME_REGEX.exec(c.name)[1]
         return normalizePage(`/${pageName}`)
       })
 
+    // loop through all entrypoints in the compilation that matches `entries` map
+    // that is it is a real "page"
+    // update page build status
+    // update `lastActiveTime`
+    // emit event that the page is built
+    // ---
     // compilation.entrypoints is a Map object, so iterating over it 0 is the key and 1 is the value
     for (const [, entrypoint] of compilation.entrypoints.entries()) {
+      // ROUTE_NAME_REGEX pattern: "static/<buildid>/pages/:page*.js"
+
+      // I wonder maybe it can just skip the first two check and relies only
+      // that if it's not in `entries` map
+
       const result = ROUTE_NAME_REGEX.exec(entrypoint.name)
+      // skip if not a page route
       if (!result) {
         continue
       }
 
       const pagePath = result[1]
 
+      // skip if no page match
       if (!pagePath) {
         continue
       }
 
       const page = normalizePage('/' + pagePath)
 
+      // the `entries` object is from the closure (onDemandEntriesHandler)
       const entry = entries[page]
+      // skip if it's not an entry page (not sure, maybe when it's just a js file in page folder)
       if (!entry) {
         continue
       }
 
+      // skip non BUILDING pages - we just want to update only BUILDING pages
       if (entry.status !== BUILDING) {
         continue
       }
@@ -121,13 +160,23 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
 
     invalidator.doneBuilding()
 
+    // (HotReloader).reload() if there're any hard failed pages
     if (hardFailedPages.length > 0 && !reloading) {
       console.log(`> Reloading webpack due to inconsistant state of pages(s): ${hardFailedPages.join(', ')}`)
       reloading = true
+      // this is from (HotReloader).reload
       reload()
         .then(() => {
           console.log('> Webpack reloaded.')
+          // `reloadCallbacks` is listened by `this.waitUntilReloaded`
+          // which is called in:
+          // - `ensurePage`
+          // - `middleware` to force client refresh (302)
+          //   ^ remember hard failed pages
           reloadCallbacks.emit('done')
+          // reload will throw away previous onDemandEntriesHandler
+          // and create a new one so we stop (cleanup) this old one
+          // because it's discarded
           stop()
         })
         .catch(err => {
@@ -143,17 +192,29 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
     disposeInactiveEntries(devMiddleware, entries, lastAccessPages, maxInactiveAge)
   }, 5000)
 
+  // fixes setInterval prevents process from exiting
+  // https://github.com/zeit/next.js/pull/3540
+  // not sure why they don't ensure setInterval is clear on exit instead
   disposeHandler.unref()
 
+  // all teardown we need to do
   function stop () {
     clearInterval(disposeHandler)
     stopped = true
-    doneCallbacks = null
+    doneCallbacks = null // is this enough to dereference all registered handlers?
     reloadCallbacks = null
   }
 
   return {
+
+    // wait for the reloadCallbacks to emit "done" event
+    // ---
+    // called: in `HotReloader.getCompilationErrors` and locally in `ensurePage` and `middleware`
+    // returns a promise that resolves 'once' reloadCallbacks is 'done'
     waitUntilReloaded () {
+      // bad idea to use event emitter because you have to ensure
+      // not to attach the listener and resolve the promise immediately
+      // if it's already resolved
       if (!reloading) return Promise.resolve(true)
       return new Promise((resolve) => {
         reloadCallbacks.once('done', function () {
@@ -162,6 +223,20 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
       })
     },
 
+    // important method: it creates and add "entry" in the `entries` map
+    // 
+    // the other primary functionality of `ensurePage` is to "wait"
+    // on a page to ensure it's built which includes kicking off the build
+    // for a page that hasn't been built and wait for it
+    // 
+    // it's not responsible for handling rebuild when page changes
+    // that is handled in `compiler.hooks.make`
+    // ---
+    // wait until reloaded
+    // then glob for the `page` file
+    // -> throws pageNotFoundError if glob result is empty
+    // wait until the page is built
+    // ^ add new entry (`entries[page]`) if it hasn't been built and include it
     async ensurePage (page) {
       await this.waitUntilReloaded()
       page = normalizePage(page)
@@ -170,12 +245,17 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
         normalizedPagePath = normalizePagePath(page)
       } catch (err) {
         console.error(err)
+        // throw page not found error if normalizePagePath fails
         throw pageNotFoundError(normalizedPagePath)
       }
 
+      // `pageExtensions` is from next config which could be a list of `.js`, `.ts`, ...
       const extensions = pageExtensions.join('|')
       const pagesDir = join(dir, 'pages')
 
+      // glob all "page" files
+      // the result will be relative path like 're/myPage.js' relative to the cwd option
+      // .slice(1) to remove leading "/" from path like "/foo/bar" -> "foo/bar"
       let paths = await glob(`{${normalizedPagePath.slice(1)}/index,${normalizedPagePath.slice(1)}}.+(${extensions})`, {cwd: pagesDir})
 
       // Default the /_error route to the Next.js provided default page
@@ -183,18 +263,17 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
         paths = ['next/dist/pages/_error']
       }
 
+      // throw page not found error if no page files found
+      // ... and _not_ requesting for `/_error`
       if (paths.length === 0) {
         throw pageNotFoundError(normalizedPagePath)
       }
 
-      const pagePath = paths[0]
-      let pageUrl = `/${pagePath.replace(new RegExp(`\\.+(${extensions})$`), '').replace(/\\/g, '/')}`.replace(/\/index$/, '')
-      pageUrl = pageUrl === '' ? '/' : pageUrl
-      const bundleFile = pageUrl === '/' ? '/index.js' : `${pageUrl}.js`
-      const name = join('static', buildId, 'pages', bundleFile)
-      const absolutePagePath = pagePath.startsWith('next/dist/pages') ? require.resolve(pagePath) : join(pagesDir, pagePath)
-
+      // check `entries[page]`
+      // if it's not in the entry, add it and kick off the build (calling invalidate)
+      // this will resolve after the page is built
       await new Promise((resolve, reject) => {
+        // the `entries` object is from the closure (onDemandEntriesHandler)
         const entryInfo = entries[page]
 
         if (entryInfo) {
@@ -211,7 +290,23 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
 
         console.log(`> Building page: ${page}`)
 
-        entries[page] = { name, absolutePagePath, status: ADDED }
+        // this block is just to prepare data
+        // for building entry object for `entries[page]`
+        const pagePath = paths[0] // glob always return an array - we grab the relative page path
+        let pageUrl = `/${pagePath.replace(new RegExp(`\\.+(${extensions})$`), '').replace(/\\/g, '/')}`.replace(/\/index$/, '')
+        pageUrl = pageUrl === '' ? '/' : pageUrl
+        const bundleFile = pageUrl === '/' ? '/index.js' : `${pageUrl}.js`
+
+        // **important** this is the only place the `enries[page]` is created+assigned
+        // the `entries` object is from the closure (onDemandEntriesHandler)
+        entries[page] = {
+          name: join('static', buildId, 'pages', bundleFile),
+          absolutePagePath: pagePath.startsWith('next/dist/pages')
+            ? require.resolve(pagePath)
+            : join(pagesDir, pagePath),
+          status: ADDED,
+        }
+
         doneCallbacks.once(page, handleCallback)
 
         invalidator.invalidate()
@@ -223,9 +318,15 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
       })
     },
 
+    // attach websocket onmessage listener to:
+    // - ws.send (json) data based on the page (entry) status
+    // (if the page is BUILT)
+    // - update `lastAccessPages` record of this onDemandEntryHandler
+    // - update (mutate) the entry `lastActiveTime`
     wsConnection (ws) {
       ws.onmessage = ({ data }) => {
         const page = normalizePage(data)
+        // the `entries` object is from the closure (onDemandEntriesHandler)
         const entryInfo = entries[page]
 
         // If there's no entry.
@@ -259,6 +360,9 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
       }
     },
 
+    // reload client (browser) if stop or after reload
+    // ignore request to `/_next/on-demand-entries-ping/`
+    // otherwise just res.end('200')
     middleware () {
       return (req, res, next) => {
         if (stopped) {
@@ -289,6 +393,9 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
   }
 }
 
+// mutate `entries`
+// remove inactive pages: pages that exceed `maxInactiveAge` (argument to `onDemandEntryHandler`)
+// from `entries` (mutate) then invalidate build (devMiddleware.invalidate) _not_ `invalidator.invalidate`
 function disposeInactiveEntries (devMiddleware, entries, lastAccessPages, maxInactiveAge) {
   const disposingPages = []
 
@@ -314,10 +421,14 @@ function disposeInactiveEntries (devMiddleware, entries, lastAccessPages, maxIna
       delete entries[page]
     })
     console.log(`> Disposing inactive page(s): ${disposingPages.join(', ')}`)
+    // this essentially calls `.invalidate` on the webpack WatchCompiler
     devMiddleware.invalidate()
   }
 }
 
+// 1) replace \ with /
+// 2) replace /index with /
+// 3) replace /foo/bar/index with /foo/bar
 // /index and / is the same. So, we need to identify both pages as the same.
 // This also applies to sub pages as well.
 export function normalizePage (page) {
@@ -328,10 +439,18 @@ export function normalizePage (page) {
   return unixPagePath.replace(/\/index$/, '')
 }
 
+// websocket.send stringified data
 function sendJson (ws, data) {
   ws.send(JSON.stringify(data))
 }
 
+// basically keep track of "building" state
+// and calls compilers and WebpackDevMiddleware invalidate
+// building will be set when invalidate is called
+// if there's already a current building, rebuildAgain flag is set
+// and it will go through the invalidation for another round
+// when the current "building" is done ... this feels very hacky/buggy
+// ---
 // Make sure only one invalidation happens at a time
 // Otherwise, webpack hash gets changed and it'll force the client to reload.
 class Invalidator {
